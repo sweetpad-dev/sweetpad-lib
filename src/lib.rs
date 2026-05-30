@@ -1,5 +1,6 @@
 pub mod bplist;
 pub mod build_context;
+pub mod catalog_cache;
 pub mod condition;
 pub mod destination;
 pub mod pbxproj;

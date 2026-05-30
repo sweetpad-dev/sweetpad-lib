@@ -7,7 +7,9 @@ use clap::{Args, Parser, Subcommand};
 use sweetpad::build_context::{BuildContext, ResolveQuery, Resolved};
 use sweetpad::destination::RunDestination;
 use sweetpad::xcspec::Catalog;
-use sweetpad::{pbxproj, project, resolver, scheme, workspace, xcconfig, xcode, xcscheme, xcspec};
+use sweetpad::{
+    catalog_cache, pbxproj, project, resolver, scheme, workspace, xcconfig, xcode, xcscheme,
+};
 
 #[derive(Parser)]
 #[command(name = "sweetpad", version, about = "Xcode project tooling", long_about = None)]
@@ -113,12 +115,17 @@ struct BuildSettingsArgs {
     /// Additional .xcconfig overlay (`xcodebuild -xcconfig FILE`).
     #[arg(long)]
     xcconfig: Option<PathBuf>,
-    /// Directory containing Apple's `*.xcspec` files.
+    /// Directory containing Apple's `*.xcspec` files. When omitted, the
+    /// defaults catalog baked into the binary (latest captured Xcode) is used.
     #[arg(long)]
     xcspec_root: Option<PathBuf>,
     /// Directory containing per-SDK `SDKSettings.plist`.
     #[arg(long)]
     sdksettings_root: Option<PathBuf>,
+    /// Cache file for the parsed `--xcspec-root` catalog. Defaults to a path in
+    /// the OS cache dir keyed by the xcspec root; ignored without `--xcspec-root`.
+    #[arg(long)]
+    catalog_cache: Option<PathBuf>,
     /// `xcodebuild -derivedDataPath PATH` — overrides the computed
     /// DerivedData root for `BUILD_DIR`, `OBJROOT`, and friends.
     #[arg(long)]
@@ -278,9 +285,10 @@ fn print_workspace_json(ws: &workspace::Workspace) {
 // -- build-settings ----------------------------------------------------------
 
 fn run_build_settings(args: &BuildSettingsArgs) -> Result<(), String> {
-    let catalog = load_optional_catalog(
+    let catalog = load_catalog(
         args.xcspec_root.as_deref(),
         args.sdksettings_root.as_deref(),
+        args.catalog_cache.as_deref(),
     )?;
     let projects = resolve_project_paths(args.project.as_deref(), args.workspace.as_deref())?;
 
@@ -345,17 +353,24 @@ struct TargetResolved {
     resolved: Resolved,
 }
 
-fn load_optional_catalog(
+/// The defaults catalog for a `build-settings` run.
+///
+/// With `--xcspec-root`, parse that tree (cached to a serialized file so repeat
+/// runs skip the ~32 ms walk). Without it, return the catalog baked into the
+/// binary for the latest captured Xcode — so the resolver always has Apple's
+/// defaults to layer under the project's settings.
+fn load_catalog(
     xcspec_root: Option<&Path>,
     sdksettings_root: Option<&Path>,
+    catalog_cache: Option<&Path>,
 ) -> Result<Option<Catalog>, String> {
-    if let Some(xcspec_dir) = xcspec_root {
-        let catalog =
-            xcspec::load_catalog(xcspec_dir, sdksettings_root).map_err(|e| e.to_string())?;
-        Ok(Some(catalog))
+    let catalog = if let Some(xcspec_dir) = xcspec_root {
+        catalog_cache::load_cached_or_build(xcspec_dir, sdksettings_root, catalog_cache)
+            .map_err(|e| e.to_string())?
     } else {
-        Ok(None)
-    }
+        catalog_cache::embedded().map_err(|e| e.to_string())?
+    };
+    Ok(Some(catalog))
 }
 
 /// Resolve the `--project` / `--workspace` selector to the concrete list

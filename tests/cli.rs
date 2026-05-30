@@ -186,6 +186,8 @@ fn list_command_shows_icecubes_schemes() {
 
 #[test]
 fn build_settings_scratch_debug() {
+    // No --xcspec-root: exercises the catalog baked into the binary, so Apple's
+    // defaults are layered under the project's settings out of the box.
     let path = fixtures_root().join("_synthetic-xcconfigs/xcode-26.5.0/project/Scratch.xcodeproj");
     let out = Command::new(binary())
         .arg("build-settings")
@@ -207,7 +209,6 @@ fn build_settings_scratch_debug() {
     for expected in [
         "    ALWAYS_SEARCH_USER_PATHS = NO",
         "    MACOSX_DEPLOYMENT_TARGET = 12.0",
-        "    SDKROOT = macosx",
         "    SWIFT_VERSION = 5.0",
         "    PRODUCT_NAME = Scratch",
     ] {
@@ -216,6 +217,15 @@ fn build_settings_scratch_debug() {
             "missing `{expected}` in output:\n{stdout}"
         );
     }
+    // With the defaults catalog present, the canonical `macosx` SDKROOT
+    // resolves to the absolute SDK path (matching real xcodebuild / the
+    // explicit --xcspec-root path).
+    assert!(
+        stdout
+            .lines()
+            .any(|l| l.starts_with("    SDKROOT = ") && l.trim_end().ends_with("MacOSX.sdk")),
+        "expected SDKROOT to resolve to a MacOSX.sdk path:\n{stdout}"
+    );
 }
 
 #[test]

@@ -19,6 +19,8 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+// A CLI dispatch enum built once at startup; the per-variant size gap doesn't matter.
+#[allow(clippy::large_enum_variant)]
 enum Command {
     /// Parse a project.pbxproj file and print its AST.
     ParsePbxproj {
@@ -115,8 +117,15 @@ struct BuildSettingsArgs {
     /// Additional .xcconfig overlay (`xcodebuild -xcconfig FILE`).
     #[arg(long)]
     xcconfig: Option<PathBuf>,
-    /// Directory containing Apple's `*.xcspec` files. When omitted, the
-    /// defaults catalog baked into the binary (latest captured Xcode) is used.
+    /// Resolve against a specific Xcode — an `Xcode.app`, its `Contents`, or a
+    /// `Contents/Developer` (DEVELOPER_DIR). The xcspec + SDKSettings roots and
+    /// the version are discovered inside it. Mutually exclusive with the
+    /// low-level `--xcspec-root` / `--sdksettings-root` overrides.
+    #[arg(long, conflicts_with_all = ["xcspec_root", "sdksettings_root"])]
+    xcode: Option<PathBuf>,
+    /// Directory containing Apple's `*.xcspec` files. When neither this nor
+    /// `--xcode` is given, the defaults catalog baked into the binary (latest
+    /// captured Xcode) is used.
     #[arg(long)]
     xcspec_root: Option<PathBuf>,
     /// Directory containing per-SDK `SDKSettings.plist`.
@@ -286,6 +295,7 @@ fn print_workspace_json(ws: &workspace::Workspace) {
 
 fn run_build_settings(args: &BuildSettingsArgs) -> Result<(), String> {
     let catalog = load_catalog(
+        args.xcode.as_deref(),
         args.xcspec_root.as_deref(),
         args.sdksettings_root.as_deref(),
         args.catalog_cache.as_deref(),
@@ -353,18 +363,36 @@ struct TargetResolved {
     resolved: Resolved,
 }
 
-/// The defaults catalog for a `build-settings` run.
+/// The defaults catalog for a `build-settings` run. Precedence:
 ///
-/// With `--xcspec-root`, parse that tree (cached to a serialized file so repeat
-/// runs skip the ~32 ms walk). Without it, return the catalog baked into the
-/// binary for the latest captured Xcode — so the resolver always has Apple's
-/// defaults to layer under the project's settings.
+/// 1. `--xcode <app>`: discover the spec + SDK roots inside that Xcode, parse
+///    them (cached, keyed by its build version), and stamp the catalog with
+///    that install's version + `DEVELOPER_DIR` so it resolves self-consistently
+///    regardless of which Xcode is `xcode-select`ed.
+/// 2. `--xcspec-root`: parse that tree directly (cached via a stat fingerprint).
+/// 3. Neither: the catalog baked into the binary for the latest captured Xcode,
+///    so the resolver always has Apple's defaults to layer under the project's.
 fn load_catalog(
+    xcode: Option<&Path>,
     xcspec_root: Option<&Path>,
     sdksettings_root: Option<&Path>,
     catalog_cache: Option<&Path>,
 ) -> Result<Option<Catalog>, String> {
-    let catalog = if let Some(xcspec_dir) = xcspec_root {
+    let catalog = if let Some(xcode_path) = xcode {
+        let layout = xcode::locate(xcode_path)?;
+        let mut catalog = catalog_cache::load_cached_or_build_keyed(
+            &layout.xcspec_root,
+            Some(&layout.sdksettings_root),
+            catalog_cache,
+            &layout.cache_key(),
+        )
+        .map_err(|e| e.to_string())?;
+        catalog.developer_dir = Some(layout.developer_dir.to_string_lossy().into_owned());
+        if !layout.short_version.is_empty() {
+            catalog.xcode_version = Some(layout.short_version);
+        }
+        catalog
+    } else if let Some(xcspec_dir) = xcspec_root {
         catalog_cache::load_cached_or_build(xcspec_dir, sdksettings_root, catalog_cache)
             .map_err(|e| e.to_string())?
     } else {

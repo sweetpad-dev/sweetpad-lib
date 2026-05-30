@@ -121,6 +121,29 @@ pub fn load_cached_or_build(
     cache_override: Option<&Path>,
 ) -> Result<Catalog, Error> {
     let fingerprint = source_fingerprint(xcspec_root, sdksettings_root);
+    load_with_fingerprint(xcspec_root, sdksettings_root, cache_override, fingerprint)
+}
+
+/// Like [`load_cached_or_build`], but validate the cache against an explicit
+/// `key` (e.g. an Xcode build version) rather than a stat-based fingerprint.
+/// Cheaper and more robust when the caller already knows the source identity —
+/// the specs are a pure function of which Xcode they came from.
+pub fn load_cached_or_build_keyed(
+    xcspec_root: &Path,
+    sdksettings_root: Option<&Path>,
+    cache_override: Option<&Path>,
+    key: &str,
+) -> Result<Catalog, Error> {
+    let fingerprint = fnv1a(key.as_bytes(), FNV_OFFSET);
+    load_with_fingerprint(xcspec_root, sdksettings_root, cache_override, fingerprint)
+}
+
+fn load_with_fingerprint(
+    xcspec_root: &Path,
+    sdksettings_root: Option<&Path>,
+    cache_override: Option<&Path>,
+    fingerprint: u64,
+) -> Result<Catalog, Error> {
     let cache_path =
         cache_override.map_or_else(|| default_cache_path(xcspec_root), Path::to_path_buf);
 

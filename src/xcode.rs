@@ -82,6 +82,70 @@ pub fn detect_developer_dir() -> PathBuf {
     PathBuf::from("/Applications/Xcode.app/Contents/Developer")
 }
 
+/// Spec + SDK roots discovered inside one Xcode install, so a `build-settings`
+/// run can resolve against a *specific* Xcode (via `--xcode`) instead of the
+/// catalog baked into the binary.
+#[derive(Debug, Clone)]
+pub struct XcodeLayout {
+    /// `…/Xcode.app/Contents/Developer` — feeds `DEVELOPER_DIR`.
+    pub developer_dir: PathBuf,
+    /// `…/Contents/SharedFrameworks` — recursively walked for `*.xcspec`.
+    pub xcspec_root: PathBuf,
+    /// `…/Contents/Developer/Platforms` — recursively walked for
+    /// `SDKSettings.plist`.
+    pub sdksettings_root: PathBuf,
+    /// `CFBundleShortVersionString` (e.g. `26.5`); empty if unreadable.
+    pub short_version: String,
+    /// `ProductBuildVersion` (e.g. `17F6`); empty if unreadable.
+    pub build_version: String,
+}
+
+impl XcodeLayout {
+    /// A stable identity for cache validation: the build + short version and
+    /// the install path. Cheaper and more robust than stat-ing every spec —
+    /// the specs are a pure function of which Xcode this is.
+    #[must_use]
+    pub fn cache_key(&self) -> String {
+        format!(
+            "{}|{}|{}",
+            self.build_version,
+            self.short_version,
+            self.developer_dir.display()
+        )
+    }
+}
+
+/// Resolve an `--xcode` argument into the directories the catalog loader needs.
+///
+/// Accepts an `Xcode.app`, its `Contents`, or a `Contents/Developer`
+/// (`DEVELOPER_DIR`) — the `Contents` dir holding both `SharedFrameworks` (where
+/// the xcspecs live) and `Developer` is the anchor we search for.
+pub fn locate(xcode_path: &Path) -> Result<XcodeLayout, String> {
+    let contents = [
+        xcode_path.to_path_buf(),
+        xcode_path.join("Contents"),
+        xcode_path.parent().map(Path::to_path_buf).unwrap_or_default(),
+    ]
+    .into_iter()
+    .find(|c| c.join("SharedFrameworks").is_dir() && c.join("Developer").is_dir())
+    .ok_or_else(|| {
+        format!(
+            "{} is not an Xcode install (no Contents/SharedFrameworks alongside Contents/Developer)",
+            xcode_path.display()
+        )
+    })?;
+
+    let developer_dir = contents.join("Developer");
+    let (short_version, build_version) = read_version_plist(&developer_dir);
+    Ok(XcodeLayout {
+        xcspec_root: contents.join("SharedFrameworks"),
+        sdksettings_root: developer_dir.join("Platforms"),
+        developer_dir,
+        short_version,
+        build_version,
+    })
+}
+
 fn read_version_plist(developer_dir: &Path) -> (String, String) {
     let plist_path = developer_dir.parent().map(|p| p.join("version.plist"));
     let Some(path) = plist_path else {
@@ -155,5 +219,40 @@ mod tests {
             Some("17A400"),
         );
         assert!(extract_plist_string(xml, "Missing").is_none());
+    }
+
+    #[test]
+    fn locate_finds_roots_from_any_entry_point() {
+        // Minimal Xcode.app skeleton in a temp dir.
+        let root = std::env::temp_dir().join(format!("sweetpad-xcode-{}", std::process::id()));
+        let app = root.join("Xcode.app");
+        let contents = app.join("Contents");
+        std::fs::create_dir_all(contents.join("SharedFrameworks")).unwrap();
+        std::fs::create_dir_all(contents.join("Developer/Platforms")).unwrap();
+        std::fs::write(
+            contents.join("version.plist"),
+            "<plist><dict><key>CFBundleShortVersionString</key><string>26.5</string>\
+             <key>ProductBuildVersion</key><string>17F6</string></dict></plist>",
+        )
+        .unwrap();
+
+        for entry in [&app, &contents, &contents.join("Developer")] {
+            let layout =
+                locate(entry).unwrap_or_else(|e| panic!("locate {}: {e}", entry.display()));
+            assert_eq!(layout.developer_dir, contents.join("Developer"));
+            assert_eq!(layout.xcspec_root, contents.join("SharedFrameworks"));
+            assert_eq!(
+                layout.sdksettings_root,
+                contents.join("Developer/Platforms")
+            );
+            assert_eq!(layout.short_version, "26.5");
+            assert_eq!(layout.build_version, "17F6");
+        }
+
+        assert!(
+            locate(&root).is_err(),
+            "bare dir without Contents should fail"
+        );
+        std::fs::remove_dir_all(&root).ok();
     }
 }

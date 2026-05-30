@@ -228,6 +228,74 @@ fn build_settings_scratch_debug() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn build_settings_via_xcode_arg() {
+    use std::os::unix::fs::symlink;
+
+    // Assemble a minimal Xcode.app skeleton that symlinks the corpus cache into
+    // the real Contents/{SharedFrameworks,Developer/Platforms} layout, so
+    // `--xcode` discovers the same specs the explicit roots would.
+    let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("xcspec-cache/xcode-26.5.0");
+    let tmp = std::env::temp_dir().join(format!("sweetpad-xcode-cli-{}", std::process::id()));
+    let contents = tmp.join("Xcode.app/Contents");
+    std::fs::create_dir_all(contents.join("Developer")).unwrap();
+    symlink(
+        cache.join("SharedFrameworks"),
+        contents.join("SharedFrameworks"),
+    )
+    .unwrap();
+    symlink(
+        cache.join("sdksettings/Platforms"),
+        contents.join("Developer/Platforms"),
+    )
+    .unwrap();
+    std::fs::write(
+        contents.join("version.plist"),
+        "<plist><dict><key>CFBundleShortVersionString</key><string>26.5</string>\
+         <key>ProductBuildVersion</key><string>17F6</string></dict></plist>",
+    )
+    .unwrap();
+
+    let path = fixtures_root().join("_synthetic-xcconfigs/xcode-26.5.0/project/Scratch.xcodeproj");
+    let out = Command::new(binary())
+        .arg("build-settings")
+        .arg("--project")
+        .arg(&path)
+        .arg("--target")
+        .arg("Scratch")
+        .arg("--config")
+        .arg("Debug")
+        .arg("--xcode")
+        .arg(tmp.join("Xcode.app"))
+        .output()
+        .expect("spawn");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // DEVELOPER_DIR + version come from the install we pointed --xcode at, not
+    // whatever Xcode is xcode-select'ed.
+    assert!(
+        stdout
+            .lines()
+            .any(|l| l.starts_with("    DEVELOPER_DIR = ")
+                && l.contains("Xcode.app/Contents/Developer")),
+        "DEVELOPER_DIR not sourced from --xcode:\n{stdout}"
+    );
+    assert!(stdout.contains("    XCODE_VERSION_MAJOR = 26"));
+    // SDKROOT resolves to a real SDK path discovered under that install.
+    assert!(
+        stdout
+            .lines()
+            .any(|l| l.starts_with("    SDKROOT = ") && l.trim_end().ends_with("MacOSX.sdk")),
+        "SDKROOT not discovered under --xcode:\n{stdout}"
+    );
+    std::fs::remove_dir_all(&tmp).ok();
+}
+
 #[test]
 fn build_settings_layers_extra_xcconfig_for_macos() {
     let path = fixtures_root().join("_synthetic-xcconfigs/xcode-26.5.0/project/Scratch.xcodeproj");

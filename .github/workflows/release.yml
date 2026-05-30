@@ -1,0 +1,57 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  build:
+    name: build universal macOS binary
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build arm64
+        run: cargo build --release --target aarch64-apple-darwin
+
+      - name: Build x86_64
+        run: cargo build --release --target x86_64-apple-darwin
+
+      - name: Lipo into universal binary
+        run: |
+          mkdir -p dist
+          lipo -create -output dist/sweetpad-darwin-universal \
+            target/aarch64-apple-darwin/release/sweetpad \
+            target/x86_64-apple-darwin/release/sweetpad
+          lipo -info dist/sweetpad-darwin-universal
+
+      - name: Ad-hoc codesign
+        run: codesign --sign - --force --options runtime --timestamp=none dist/sweetpad-darwin-universal
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: sweetpad-darwin-universal
+          path: dist/sweetpad-darwin-universal
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true

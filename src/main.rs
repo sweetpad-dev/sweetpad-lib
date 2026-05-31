@@ -5,7 +5,7 @@ use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand};
 use sweetpad::build_context::{BuildContext, ResolveQuery, Resolved};
-use sweetpad::destination::RunDestination;
+use sweetpad::destination::{RunDestination, parse_destination_arg};
 use sweetpad::xcspec::Catalog;
 use sweetpad::{
     catalog_cache, pbxproj, project, resolver, scheme, workspace, xcconfig, xcode, xcscheme,
@@ -108,12 +108,20 @@ struct BuildSettingsArgs {
     /// Configuration (e.g. `Debug`, `Release`).
     #[arg(long = "config")]
     configuration: String,
-    /// SDK to bind conditional assignments to.
+    /// SDK to bind conditional assignments to. Ignored when `--destination`
+    /// is given (the destination's platform wins).
     #[arg(long, default_value = "macosx")]
     sdk: String,
-    /// Architecture to bind conditional assignments to.
+    /// Architecture to bind conditional assignments to. Ignored when
+    /// `--destination` is given (the destination's arch wins).
     #[arg(long, default_value = "arm64")]
     arch: String,
+    /// `xcodebuild -destination` string, e.g.
+    /// `platform=iOS Simulator,id=<udid>` or `platform=macOS`. Binds the run
+    /// destination so destination-aware settings resolve (ARCHS collapses,
+    /// `ONLY_ACTIVE_ARCH` flips, …) and supplies the SDK + arch.
+    #[arg(long)]
+    destination: Option<String>,
     /// Additional .xcconfig overlay (`xcodebuild -xcconfig FILE`).
     #[arg(long)]
     xcconfig: Option<PathBuf>,
@@ -301,6 +309,12 @@ fn run_build_settings(args: &BuildSettingsArgs) -> Result<(), String> {
         args.catalog_cache.as_deref(),
     )?;
     let projects = resolve_project_paths(args.project.as_deref(), args.workspace.as_deref())?;
+    let destination = match args.destination.as_deref() {
+        Some(s) => {
+            Some(parse_destination_arg(s).ok_or_else(|| format!("invalid --destination: {s:?}"))?)
+        }
+        None => None,
+    };
 
     let want_scheme = args.scheme.as_deref();
     let want_target = args.target.as_deref();
@@ -308,7 +322,7 @@ fn run_build_settings(args: &BuildSettingsArgs) -> Result<(), String> {
         // Single project: bubble up the underlying error directly so
         // callers get xcodebuild-equivalent messages ("no target named …").
         let ctx = build_one_context(&projects[0], catalog.as_ref(), args.xcconfig.as_deref())?;
-        let queries = build_queries(&ctx, args, want_scheme, want_target);
+        let queries = build_queries(&ctx, args, want_scheme, want_target, destination.as_ref());
         let mut out = Vec::new();
         for query in queries {
             let resolved = ctx.resolve(&query).map_err(|e| e.to_string())?;
@@ -325,7 +339,7 @@ fn run_build_settings(args: &BuildSettingsArgs) -> Result<(), String> {
         let mut out = Vec::new();
         for project_path in &projects {
             let ctx = build_one_context(project_path, catalog.as_ref(), args.xcconfig.as_deref())?;
-            let queries = build_queries(&ctx, args, want_scheme, want_target);
+            let queries = build_queries(&ctx, args, want_scheme, want_target, destination.as_ref());
             for query in queries {
                 if let Ok(r) = ctx.resolve(&query) {
                     out.push(TargetResolved {
@@ -440,7 +454,14 @@ fn build_queries(
     args: &BuildSettingsArgs,
     want_scheme: Option<&str>,
     want_target: Option<&str>,
+    destination: Option<&RunDestination>,
 ) -> Vec<ResolveQuery> {
+    // A bound destination supplies the SDK + active arch (mirroring xcodebuild,
+    // where `-destination` implies them); otherwise fall back to `--sdk`/`--arch`.
+    let (sdk, arch) = match destination {
+        Some(d) => (d.platform.as_str(), d.arch.as_str()),
+        None => (args.sdk.as_str(), args.arch.as_str()),
+    };
     let mut queries = Vec::new();
     if let Some(scheme_name) = want_scheme {
         let scheme_path = ctx
@@ -451,13 +472,7 @@ fn build_queries(
         let Ok(parsed) = scheme::parse_file(&scheme_path) else {
             return queries;
         };
-        let plan = ctx.plan_build(
-            &parsed,
-            &args.configuration,
-            &args.sdk,
-            &args.arch,
-            None::<&RunDestination>,
-        );
+        let plan = ctx.plan_build(&parsed, &args.configuration, sdk, arch, destination);
         for mut q in plan.entries {
             if let Some(p) = &args.derived_data_path {
                 q = q.with_derived_data_path(p.clone());
@@ -465,7 +480,10 @@ fn build_queries(
             queries.push(q);
         }
     } else if let Some(target_name) = want_target {
-        let mut q = ResolveQuery::new(target_name, &args.configuration, &args.sdk, &args.arch);
+        let mut q = ResolveQuery::new(target_name, &args.configuration, sdk, arch);
+        if let Some(d) = destination {
+            q = q.with_destination(d.clone());
+        }
         if let Some(p) = &args.derived_data_path {
             q = q.with_derived_data_path(p.clone());
         }

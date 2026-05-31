@@ -392,3 +392,72 @@ fn no_subcommand_shows_help_and_fails() {
     let out = Command::new(binary()).output().expect("spawn");
     assert!(!out.status.success());
 }
+
+fn kingfisher_proj() -> PathBuf {
+    fixtures_root().join("kingfisher/xcode-26.5.0/raw/Kingfisher.xcodeproj")
+}
+
+fn build_settings(extra: &[&str]) -> std::process::Output {
+    Command::new(binary())
+        .arg("build-settings")
+        .arg("--project")
+        .arg(kingfisher_proj())
+        .args(["--target", "Kingfisher", "--config", "Debug", "--json"])
+        .args(extra)
+        .output()
+        .expect("spawn")
+}
+
+#[test]
+fn build_settings_destination_collapses_macos_archs() {
+    // No destination on macOS reports the SDK's full standard arch list,
+    // but a bound macOS destination collapses ARCHS to the active arch —
+    // the headline destination-aware behaviour.
+    let no_dest = build_settings(&["--sdk", "macosx"]);
+    assert!(no_dest.status.success());
+    let no_dest = String::from_utf8_lossy(&no_dest.stdout);
+    assert!(
+        no_dest.contains("\"ARCHS\": \"arm64 x86_64\""),
+        "expected full arch list without destination: {no_dest}"
+    );
+
+    let dest = build_settings(&["--destination", "platform=macOS"]);
+    assert!(dest.status.success());
+    let dest = String::from_utf8_lossy(&dest.stdout);
+    assert!(
+        dest.contains("\"ARCHS\": \"arm64\""),
+        "expected collapsed arch with destination: {dest}"
+    );
+}
+
+#[test]
+fn build_settings_destination_supplies_platform() {
+    // An `id=`-only simulator destination (the common IDE case) supplies the
+    // SDK with no `--sdk`, and still resolves the catalog-backed product keys.
+    let out = build_settings(&["--destination", "platform=iOS Simulator,id=ABC-123"]);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("\"PLATFORM_NAME\": \"iphonesimulator\""),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("\"WRAPPER_NAME\": \"Kingfisher.framework\""),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn build_settings_rejects_invalid_destination() {
+    let out = build_settings(&["--destination", "platform=Android"]);
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("invalid --destination"),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}

@@ -7,7 +7,9 @@ use clap::{Args, Parser, Subcommand};
 use sweetpad::build_context::{BuildContext, ResolveQuery, Resolved};
 use sweetpad::destination::RunDestination;
 use sweetpad::xcspec::Catalog;
-use sweetpad::{pbxproj, project, resolver, scheme, workspace, xcconfig, xcode, xcscheme, xcspec};
+use sweetpad::{
+    catalog_cache, pbxproj, project, resolver, scheme, workspace, xcconfig, xcode, xcscheme,
+};
 
 #[derive(Parser)]
 #[command(name = "sweetpad", version, about = "Xcode project tooling", long_about = None)]
@@ -17,6 +19,8 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+// A CLI dispatch enum built once at startup; the per-variant size gap doesn't matter.
+#[allow(clippy::large_enum_variant)]
 enum Command {
     /// Parse a project.pbxproj file and print its AST.
     ParsePbxproj {
@@ -113,12 +117,24 @@ struct BuildSettingsArgs {
     /// Additional .xcconfig overlay (`xcodebuild -xcconfig FILE`).
     #[arg(long)]
     xcconfig: Option<PathBuf>,
-    /// Directory containing Apple's `*.xcspec` files.
+    /// Resolve against a specific Xcode — an `Xcode.app`, its `Contents`, or a
+    /// `Contents/Developer` (DEVELOPER_DIR). The xcspec + SDKSettings roots and
+    /// the version are discovered inside it. Mutually exclusive with the
+    /// low-level `--xcspec-root` / `--sdksettings-root` overrides.
+    #[arg(long, conflicts_with_all = ["xcspec_root", "sdksettings_root"])]
+    xcode: Option<PathBuf>,
+    /// Directory containing Apple's `*.xcspec` files. When neither this nor
+    /// `--xcode` is given, the defaults catalog baked into the binary (latest
+    /// captured Xcode) is used.
     #[arg(long)]
     xcspec_root: Option<PathBuf>,
     /// Directory containing per-SDK `SDKSettings.plist`.
     #[arg(long)]
     sdksettings_root: Option<PathBuf>,
+    /// Cache file for the parsed `--xcspec-root` catalog. Defaults to a path in
+    /// the OS cache dir keyed by the xcspec root; ignored without `--xcspec-root`.
+    #[arg(long)]
+    catalog_cache: Option<PathBuf>,
     /// `xcodebuild -derivedDataPath PATH` — overrides the computed
     /// DerivedData root for `BUILD_DIR`, `OBJROOT`, and friends.
     #[arg(long)]
@@ -278,9 +294,11 @@ fn print_workspace_json(ws: &workspace::Workspace) {
 // -- build-settings ----------------------------------------------------------
 
 fn run_build_settings(args: &BuildSettingsArgs) -> Result<(), String> {
-    let catalog = load_optional_catalog(
+    let catalog = load_catalog(
+        args.xcode.as_deref(),
         args.xcspec_root.as_deref(),
         args.sdksettings_root.as_deref(),
+        args.catalog_cache.as_deref(),
     )?;
     let projects = resolve_project_paths(args.project.as_deref(), args.workspace.as_deref())?;
 
@@ -345,17 +363,42 @@ struct TargetResolved {
     resolved: Resolved,
 }
 
-fn load_optional_catalog(
+/// The defaults catalog for a `build-settings` run. Precedence:
+///
+/// 1. `--xcode <app>`: discover the spec + SDK roots inside that Xcode, parse
+///    them (cached, keyed by its build version), and stamp the catalog with
+///    that install's version + `DEVELOPER_DIR` so it resolves self-consistently
+///    regardless of which Xcode is `xcode-select`ed.
+/// 2. `--xcspec-root`: parse that tree directly (cached via a stat fingerprint).
+/// 3. Neither: the catalog baked into the binary for the latest captured Xcode,
+///    so the resolver always has Apple's defaults to layer under the project's.
+fn load_catalog(
+    xcode: Option<&Path>,
     xcspec_root: Option<&Path>,
     sdksettings_root: Option<&Path>,
+    catalog_cache: Option<&Path>,
 ) -> Result<Option<Catalog>, String> {
-    if let Some(xcspec_dir) = xcspec_root {
-        let catalog =
-            xcspec::load_catalog(xcspec_dir, sdksettings_root).map_err(|e| e.to_string())?;
-        Ok(Some(catalog))
+    let catalog = if let Some(xcode_path) = xcode {
+        let layout = xcode::locate(xcode_path)?;
+        let mut catalog = catalog_cache::load_cached_or_build_keyed(
+            &layout.xcspec_root,
+            Some(&layout.sdksettings_root),
+            catalog_cache,
+            &layout.cache_key(),
+        )
+        .map_err(|e| e.to_string())?;
+        catalog.developer_dir = Some(layout.developer_dir.to_string_lossy().into_owned());
+        if !layout.short_version.is_empty() {
+            catalog.xcode_version = Some(layout.short_version);
+        }
+        catalog
+    } else if let Some(xcspec_dir) = xcspec_root {
+        catalog_cache::load_cached_or_build(xcspec_dir, sdksettings_root, catalog_cache)
+            .map_err(|e| e.to_string())?
     } else {
-        Ok(None)
-    }
+        catalog_cache::embedded().map_err(|e| e.to_string())?
+    };
+    Ok(Some(catalog))
 }
 
 /// Resolve the `--project` / `--workspace` selector to the concrete list

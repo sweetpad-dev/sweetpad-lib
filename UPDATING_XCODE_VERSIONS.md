@@ -150,6 +150,20 @@ And these **version-specific assertions / slugs**:
 `grep -rn 'xcode-<old>\|macosx<old SDK>\|OS<old sim OS>' src/ tests/` should come
 back clean except `tests/common/mod.rs` test data.
 
+## 7b. Refresh the embedded defaults catalog (when the latest version changes)
+
+`build-settings` with no `--xcspec-root` resolves against a catalog baked into
+the binary (`src/catalog_embedded.bin`), which tracks the **newest** captured
+Xcode. When you add a new major or bump the latest minor, regenerate it:
+
+```
+# point DEFAULT_VERSION in examples/gen_embedded_catalog.rs at the new version, then:
+cargo run --release --example gen_embedded_catalog
+git add src/catalog_embedded.bin
+```
+It prints the assignment/product-type counts; commit the regenerated blob. (No
+need to touch it when only refreshing an *older* major.)
+
 ## 8. Green, docs, commit
 
 - `cargo test` (all versions green), `cargo fmt`, `cargo clippy --tests`.

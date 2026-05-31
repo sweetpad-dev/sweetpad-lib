@@ -119,12 +119,11 @@ pub fn resolve_build_settings(opts: &BuildSettingsOptions) -> Result<Vec<TargetS
 
 /// The defaults catalog for a `build-settings` run. Precedence:
 ///
-/// 1. `xcode`: discover the spec + SDK roots inside that Xcode, parse them
-///    (cached, keyed by its build version), and stamp the catalog with that
-///    install's version + `DEVELOPER_DIR` so it resolves self-consistently
-///    regardless of which Xcode is `xcode-select`ed.
+/// 1. `xcode`: discover the spec + SDK roots inside that specific Xcode.
 /// 2. `xcspec_root`: parse that tree directly (cached via a stat fingerprint).
-/// 3. Neither: the catalog baked into the binary for the latest captured Xcode.
+/// 3. Neither: resolve against the **active** Xcode (`DEVELOPER_DIR` /
+///    `xcode-select -p`), matching what `xcodebuild` does — falling back to the
+///    catalog baked into the binary only if no Xcode can be located/parsed.
 fn load_catalog(
     xcode: Option<&Path>,
     xcspec_root: Option<&Path>,
@@ -132,26 +131,39 @@ fn load_catalog(
     catalog_cache: Option<&Path>,
 ) -> Result<Option<Catalog>, String> {
     let catalog = if let Some(xcode_path) = xcode {
-        let layout = xcode::locate(xcode_path)?;
-        let mut catalog = catalog_cache::load_cached_or_build_keyed(
-            &layout.xcspec_root,
-            Some(&layout.sdksettings_root),
-            catalog_cache,
-            &layout.cache_key(),
-        )
-        .map_err(|e| e.to_string())?;
-        catalog.developer_dir = Some(layout.developer_dir.to_string_lossy().into_owned());
-        if !layout.short_version.is_empty() {
-            catalog.xcode_version = Some(layout.short_version);
-        }
-        catalog
+        catalog_from_xcode(xcode_path, catalog_cache)?
     } else if let Some(xcspec_dir) = xcspec_root {
         catalog_cache::load_cached_or_build(xcspec_dir, sdksettings_root, catalog_cache)
             .map_err(|e| e.to_string())?
     } else {
-        catalog_cache::embedded().map_err(|e| e.to_string())?
+        // No explicit source: resolve against the active Xcode, falling back to
+        // the embedded snapshot if it can't be located/parsed (e.g. no Xcode).
+        match catalog_from_xcode(&xcode::detect_developer_dir(), catalog_cache) {
+            Ok(catalog) => catalog,
+            Err(_) => catalog_cache::embedded().map_err(|e| e.to_string())?,
+        }
     };
     Ok(Some(catalog))
+}
+
+/// Build the defaults catalog from a specific Xcode install: discover its spec +
+/// SDK roots, parse them (cached, keyed by build version), and stamp the catalog
+/// with that install's `DEVELOPER_DIR` + version so it resolves
+/// self-consistently regardless of which Xcode is `xcode-select`ed.
+fn catalog_from_xcode(xcode_path: &Path, catalog_cache: Option<&Path>) -> Result<Catalog, String> {
+    let layout = xcode::locate(xcode_path)?;
+    let mut catalog = catalog_cache::load_cached_or_build_keyed(
+        &layout.xcspec_root,
+        Some(&layout.sdksettings_root),
+        catalog_cache,
+        &layout.cache_key(),
+    )
+    .map_err(|e| e.to_string())?;
+    catalog.developer_dir = Some(layout.developer_dir.to_string_lossy().into_owned());
+    if !layout.short_version.is_empty() {
+        catalog.xcode_version = Some(layout.short_version);
+    }
+    Ok(catalog)
 }
 
 /// Resolve the `project` / `workspace` selector to the concrete list of

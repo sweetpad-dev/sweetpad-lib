@@ -3,6 +3,9 @@ use std::fmt;
 use std::fs;
 use std::io;
 use std::path::Path;
+use std::sync::{Arc, LazyLock};
+
+use crate::file_cache::ParseCache;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Value {
@@ -108,6 +111,19 @@ pub fn parse(input: &str) -> Result<Value, ParseError> {
 pub fn parse_file(path: &Path) -> Result<Value, Error> {
     let s = fs::read_to_string(path)?;
     Ok(parse(&s)?)
+}
+
+/// Process-global cache of parsed pbxproj files, validated by `(len, mtime)`.
+static CACHE: LazyLock<ParseCache<Value>> = LazyLock::new(ParseCache::new);
+
+/// Like [`parse_file`] but served from an in-memory, mtime-validated cache,
+/// returning a shared `Arc<Value>`. The long-lived node addon parses the same
+/// `project.pbxproj` on every `build-settings` / `list` call, so this hands
+/// back the cached AST until the file changes on disk. The raw [`parse_file`]
+/// stays for one-shot reads (e.g. xcspec parsing, cached separately by
+/// [`crate::catalog_cache`]).
+pub fn parse_file_cached(path: &Path) -> Result<Arc<Value>, Error> {
+    CACHE.get_or_parse(path, parse_file)
 }
 
 struct Parser<'a> {

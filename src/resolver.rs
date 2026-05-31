@@ -71,7 +71,9 @@ pub fn flatten_xcconfig(path: &Path) -> Result<Vec<Assignment>, Error> {
 }
 
 fn flatten_into(path: &Path, out: &mut Vec<Assignment>) -> Result<(), Error> {
-    let xcc = xcconfig::parse_file(path).map_err(|e| match e {
+    // Shared cache entry — iterate by reference and clone each assignment out
+    // rather than consuming the (now `Arc`-owned) parse.
+    let xcc = xcconfig::parse_file_cached(path).map_err(|e| match e {
         xcconfig::Error::Io(source) => Error::Io {
             path: path.to_path_buf(),
             source,
@@ -82,9 +84,9 @@ fn flatten_into(path: &Path, out: &mut Vec<Assignment>) -> Result<(), Error> {
         },
     })?;
     let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
-    for entry in xcc.entries {
+    for entry in &xcc.entries {
         match entry {
-            Entry::Assignment(a) => out.push(a),
+            Entry::Assignment(a) => out.push(a.clone()),
             Entry::Include(inc) => {
                 let inc_path = base_dir.join(&inc.path);
                 match flatten_into(&inc_path, out) {

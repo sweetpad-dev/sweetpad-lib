@@ -2,6 +2,9 @@ use std::fmt;
 use std::fs;
 use std::io;
 use std::path::Path;
+use std::sync::{Arc, LazyLock};
+
+use crate::file_cache::ParseCache;
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Xcconfig {
@@ -110,6 +113,18 @@ pub fn parse(input: &str) -> Result<Xcconfig, ParseError> {
 pub fn parse_file(path: &Path) -> Result<Xcconfig, Error> {
     let s = fs::read_to_string(path)?;
     Ok(parse(&s)?)
+}
+
+/// Process-global cache of parsed `.xcconfig` files, validated by `(len, mtime)`.
+static CACHE: LazyLock<ParseCache<Xcconfig>> = LazyLock::new(ParseCache::new);
+
+/// Like [`parse_file`] but served from an in-memory, mtime-validated cache.
+/// `.xcconfig`s are re-read on every resolve (the project + target base
+/// configs, plus any `-xcconfig` overlay and the files its `#include`s pull
+/// in), so this caches each file's parse — keyed and re-validated per file, so
+/// an edited include still reparses — until it changes on disk.
+pub fn parse_file_cached(path: &Path) -> Result<Arc<Xcconfig>, Error> {
+    CACHE.get_or_parse(path, parse_file)
 }
 
 fn strip_line_comment(line: &str) -> &str {

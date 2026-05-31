@@ -27,11 +27,13 @@
 //! the string when present; sequences/maps are a `u32` count then their items.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fmt;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::{LazyLock, Mutex, MutexGuard, PoisonError};
 use std::time::UNIX_EPOCH;
 
 use crate::xcconfig::{Assignment, Condition};
@@ -138,21 +140,43 @@ pub fn load_cached_or_build_keyed(
     load_with_fingerprint(xcspec_root, sdksettings_root, cache_override, fingerprint)
 }
 
+/// Process-global cache of parsed catalogs, keyed by the same fingerprint the
+/// disk cache uses. The node addon is long-lived, so once a catalog is parsed
+/// (or read from disk) it stays in memory for the rest of the session and every
+/// later `build-settings` call skips the cache-file read + deserialize.
+static MEMORY_CACHE: LazyLock<Mutex<HashMap<u64, Catalog>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn memory_cache() -> MutexGuard<'static, HashMap<u64, Catalog>> {
+    MEMORY_CACHE.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 fn load_with_fingerprint(
     xcspec_root: &Path,
     sdksettings_root: Option<&Path>,
     cache_override: Option<&Path>,
     fingerprint: u64,
 ) -> Result<Catalog, Error> {
+    // In-memory tier: reuse a catalog already parsed/read in this process.
+    {
+        let cache = memory_cache();
+        if let Some(catalog) = cache.get(&fingerprint) {
+            return Ok(catalog.clone());
+        }
+    }
+
     let cache_path =
         cache_override.map_or_else(|| default_cache_path(xcspec_root), Path::to_path_buf);
 
-    if let Some(catalog) = read_valid_cache(&cache_path, fingerprint) {
-        return Ok(catalog);
-    }
+    let catalog = if let Some(catalog) = read_valid_cache(&cache_path, fingerprint) {
+        catalog
+    } else {
+        let catalog = xcspec::load_catalog(xcspec_root, sdksettings_root).map_err(Error::Build)?;
+        let _ = write_cache(&cache_path, &serialize(&catalog, fingerprint));
+        catalog
+    };
 
-    let catalog = xcspec::load_catalog(xcspec_root, sdksettings_root).map_err(Error::Build)?;
-    let _ = write_cache(&cache_path, &serialize(&catalog, fingerprint));
+    memory_cache().insert(fingerprint, catalog.clone());
     Ok(catalog)
 }
 

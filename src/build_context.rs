@@ -20,6 +20,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::destination::RunDestination;
 use crate::pbxproj::Value;
@@ -34,8 +35,10 @@ use crate::xcspec::Catalog;
 pub struct BuildContext {
     /// High-level project metadata (targets, configurations, schemes, path).
     pub project: Project,
-    /// Parsed pbxproj root, cached so each [`Self::resolve`] reuses the parse.
-    pbxproj: Value,
+    /// Parsed pbxproj root — a shared, mtime-validated cache entry (see
+    /// [`project::parse_pbxproj`]) reused by each [`Self::resolve`] and shared
+    /// across every `BuildContext` opened on the same project.
+    pbxproj: Arc<Value>,
     /// xcspec + `SDKSettings.plist` defaults catalog. `None` skips the
     /// defaults layer — you'll get only the user-authored settings + built-ins.
     pub xcspec: Option<Catalog>,

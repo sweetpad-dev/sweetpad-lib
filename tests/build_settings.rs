@@ -2,6 +2,10 @@
 //! (`build_settings::resolve_build_settings`) — the behaviours previously
 //! exercised end-to-end through the (removed) CLI `build-settings` command.
 
+// Test helpers take owned options and assert on a literal `.sdk` suffix; the
+// pedantic lints for those don't apply in tests.
+#![allow(clippy::needless_pass_by_value, clippy::case_sensitive_file_extension_comparisons)]
+
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
@@ -56,9 +60,9 @@ fn kingfisher_opts() -> BuildSettingsOptions {
 }
 
 #[test]
-fn scratch_debug_uses_embedded_catalog_defaults() {
-    // No xcode/xcspec_root: exercises the catalog baked into the binary, so
-    // Apple's defaults layer under the project's settings out of the box.
+fn scratch_debug_resolves_against_active_xcode() {
+    // No xcode/xcspec_root: resolves against the active Xcode's specs + SDKs
+    // (matching xcodebuild), so Apple's defaults layer under the project's.
     let s = resolve_one(scratch_opts());
     assert_eq!(
         s.get("ALWAYS_SEARCH_USER_PATHS").map(String::as_str),
@@ -70,9 +74,13 @@ fn scratch_debug_uses_embedded_catalog_defaults() {
     );
     assert_eq!(s.get("SWIFT_VERSION").map(String::as_str), Some("5.0"));
     assert_eq!(s.get("PRODUCT_NAME").map(String::as_str), Some("Scratch"));
-    // The canonical `macosx` SDKROOT resolves to the absolute SDK path.
+    // `macosx` SDKROOT resolves to the active Xcode's absolute macOS SDK path
+    // (e.g. `…/MacOSX15.5.sdk` on Xcode 16.4, `…/MacOSX.sdk` on others).
     let sdkroot = s.get("SDKROOT").expect("SDKROOT present");
-    assert!(sdkroot.ends_with("MacOSX.sdk"), "SDKROOT = {sdkroot}");
+    assert!(
+        sdkroot.contains("MacOSX") && sdkroot.ends_with(".sdk"),
+        "SDKROOT = {sdkroot}"
+    );
 }
 
 #[test]

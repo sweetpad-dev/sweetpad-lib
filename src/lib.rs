@@ -16,6 +16,7 @@ pub mod build_settings;
 pub mod catalog_cache;
 pub mod condition;
 pub mod destination;
+mod file_cache;
 #[cfg(feature = "node")]
 pub mod node;
 pub mod pbxproj;

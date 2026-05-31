@@ -4,6 +4,7 @@ use std::fmt;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::destination::RunDestination;
 use crate::pbxproj::{self, Value};
@@ -103,10 +104,14 @@ pub fn open_from_value(value: &Value, xcodeproj_path: &Path) -> Result<Project, 
     })
 }
 
-/// Parse the `project.pbxproj` under an `.xcodeproj` directory.
-pub fn parse_pbxproj(xcodeproj_path: &Path) -> Result<Value, Error> {
+/// Parse the `project.pbxproj` under an `.xcodeproj` directory. Served from a
+/// shared, mtime-validated cache (see [`pbxproj::parse_file_cached`]) so the
+/// same project parsed across many calls reuses the AST; the `Arc<Value>` is
+/// freely borrowed as `&Value` by [`open_from_value`] /
+/// [`build_settings_from_value`].
+pub fn parse_pbxproj(xcodeproj_path: &Path) -> Result<Arc<Value>, Error> {
     let pbxproj_path = xcodeproj_path.join("project.pbxproj");
-    pbxproj::parse_file(&pbxproj_path).map_err(|e| match e {
+    pbxproj::parse_file_cached(&pbxproj_path).map_err(|e| match e {
         pbxproj::Error::Io(e) => Error::Io(e),
         pbxproj::Error::Parse(e) => Error::Parse(e),
     })

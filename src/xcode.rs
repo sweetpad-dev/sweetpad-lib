@@ -2,11 +2,21 @@
 //!
 //! The library shells out the same way `xcrun xcodebuild -version` and
 //! `xcode-select -p` would, then reads `version.plist` next to the active
-//! Developer directory. Caching is the caller's problem — these functions
-//! always re-detect.
+//! Developer directory.
+//!
+//! Both detections are memoized for the life of the process: the node addon is
+//! long-lived and resolves against the same Xcode on every call, so the
+//! `xcode-select` subprocess ([`detect_developer_dir`]) and the per-install
+//! `version.plist` read ([`locate`]) each run once and are served from memory
+//! after. `DEVELOPER_DIR` is still read live on every [`detect_developer_dir`]
+//! call, so an env override always wins. The trade-off is session staleness:
+//! switching the active Xcode (`xcode-select -s`) or updating one in place
+//! isn't observed until the process restarts.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{LazyLock, Mutex, MutexGuard, OnceLock, PoisonError};
 
 /// Snapshot of the active Xcode toolchain.
 #[derive(Debug, Clone)]
@@ -71,15 +81,28 @@ pub fn detect_developer_dir() -> PathBuf {
     {
         return PathBuf::from(val);
     }
-    if let Ok(output) = Command::new("xcode-select").arg("-p").output()
-        && output.status.success()
-    {
-        let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !s.is_empty() {
-            return PathBuf::from(s);
-        }
-    }
-    PathBuf::from("/Applications/Xcode.app/Contents/Developer")
+    selected_developer_dir()
+}
+
+/// `xcode-select -p` (with the hard-coded fallback when the tool is missing or
+/// nothing is selected), memoized for the process. `DEVELOPER_DIR` is honoured
+/// ahead of this in [`detect_developer_dir`], so only the subprocess result is
+/// frozen — an env override stays live.
+fn selected_developer_dir() -> PathBuf {
+    static SELECTED: OnceLock<PathBuf> = OnceLock::new();
+    SELECTED
+        .get_or_init(|| {
+            if let Ok(output) = Command::new("xcode-select").arg("-p").output()
+                && output.status.success()
+            {
+                let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !s.is_empty() {
+                    return PathBuf::from(s);
+                }
+            }
+            PathBuf::from("/Applications/Xcode.app/Contents/Developer")
+        })
+        .clone()
 }
 
 /// Spec + SDK roots discovered inside one Xcode install, so a `build-settings`
@@ -115,12 +138,34 @@ impl XcodeLayout {
     }
 }
 
+/// Process-global cache of resolved [`XcodeLayout`]s, keyed by the input path,
+/// so `version.plist` is read once per Xcode. Only successful resolves are
+/// cached; see the module note on staleness.
+static LAYOUT_CACHE: LazyLock<Mutex<HashMap<PathBuf, XcodeLayout>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn layout_cache() -> MutexGuard<'static, HashMap<PathBuf, XcodeLayout>> {
+    LAYOUT_CACHE.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 /// Resolve an `--xcode` argument into the directories the catalog loader needs.
 ///
 /// Accepts an `Xcode.app`, its `Contents`, or a `Contents/Developer`
 /// (`DEVELOPER_DIR`) — the `Contents` dir holding both `SharedFrameworks` (where
 /// the xcspecs live) and `Developer` is the anchor we search for.
+///
+/// Cached: a second call for the same path returns the stored layout without
+/// re-reading `version.plist`.
 pub fn locate(xcode_path: &Path) -> Result<XcodeLayout, String> {
+    if let Some(layout) = layout_cache().get(xcode_path) {
+        return Ok(layout.clone());
+    }
+    let layout = locate_uncached(xcode_path)?;
+    layout_cache().insert(xcode_path.to_path_buf(), layout.clone());
+    Ok(layout)
+}
+
+fn locate_uncached(xcode_path: &Path) -> Result<XcodeLayout, String> {
     let contents = [
         xcode_path.to_path_buf(),
         xcode_path.join("Contents"),

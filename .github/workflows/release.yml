@@ -1,0 +1,48 @@
+name: release
+
+# Publishes the `@sweetpad/lib` N-API addon to npm. Internal package consumed
+# only by the SweetPad VS Code extension. Tag a version (e.g. `v0.1.0`) to run.
+# Requires an `NPM_SECRET` repo secret (an npm token with publish rights to the
+# `@sweetpad` scope).
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  publish:
+    name: build universal addon + publish to npm
+    runs-on: macos-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+
+      - run: npm ci
+
+      - name: Build arm64 addon
+        run: npx napi build --platform --release --features node --target aarch64-apple-darwin
+
+      - name: Build x86_64 addon
+        run: npx napi build --platform --release --features node --target x86_64-apple-darwin
+
+      - name: Combine into a universal binary
+        run: npx napi universalize
+
+      - name: Keep only the universal binary
+        run: rm -f sweetpad-lib.darwin-arm64.node sweetpad-lib.darwin-x64.node
+
+      - name: Publish to npm
+        run: npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_SECRET }}
